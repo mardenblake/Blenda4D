@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Symmetry the way C4D works it, on top of Blender's mesh symmetry (which only mirrors moves of existing points).
+"""Symmetry you can see, on top of Blender's mesh symmetry (which only mirrors moves of existing points).
 
 While a mesh is edited with Symmetry on:
 - the selection is kept mirrored: picking an element also selects its partner on the other side, so every tool
@@ -7,7 +7,7 @@ While a mesh is edited with Symmetry on:
 - Extrude grows each picked group straight out along its own normal, on both sides;
 - a see-through plane marks each mirror, in its axis colour, and the partners of what was picked are drawn in blue.
 
-With or without Symmetry, Extrude (D) and Inset (I) drag from anywhere in the view as in C4D: right raises the
+With or without Symmetry, Extrude (D) and Inset (I) drag from anywhere in the view: right raises the
 offset, left lowers it and goes negative. Inset shrinks each group as a whole and flares it out when negative.
 """
 import itertools
@@ -21,7 +21,7 @@ from gpu_extras.batch import batch_for_shader
 from mathutils import Matrix, Vector
 from mathutils.kdtree import KDTree
 
-# Blender's mirror switch, the local axis it flips, the colour of the axis as Blenda shows it (Blender Y is C4D Z)
+# Blender's mirror switch, the local axis it flips, the colour of the axis as Blenda shows it (Blender's Y is Blenda's Z)
 AXES = (("use_mirror_x", 0, (0.95, 0.27, 0.27)), ("use_mirror_y", 1, (0.27, 0.5, 0.98)), ("use_mirror_z", 2, (0.4, 0.85, 0.35)))
 TWIN = (0.3, 0.62, 1.0)
 TOO_MANY = 250000            # points; past this the selection isn't mirrored, to keep editing quick
@@ -224,7 +224,7 @@ def _spaces():
 
 def _hide_handle(hide):
     """The stand-in extrude's handle points along the selection's average normal, which for two mirrored sides lies
-    in the plane, so it is hidden while it stands in; the extrude is dragged anywhere in the view, as in C4D."""
+    in the plane, so it is hidden while it stands in; the extrude is dragged anywhere in the view."""
     if hide:
         for sp in _spaces():
             key = sp.as_pointer()
@@ -342,7 +342,7 @@ def _draw():
     gpu.state.blend_set("NONE")
 
 
-# --- extruding both sides, as C4D does ---------------------------------------------------------------------------
+# --- extruding both sides -------------------------------------------------------------------------------------------
 def extrude_regions(ob):
     """Extrude the selected polygons. Returns (moves, new point numbers, original polygon numbers): moves are
     (point number, start place, normal of its region). Each connected region moves along its own normal, so mirrored
@@ -410,8 +410,8 @@ class BLENDA4D_OT_symmetry_extrude(bpy.types.Operator):
         got = extrude_regions(ob)
         if got is None:
             return {"CANCELLED"}
+        place(ob, got[0], self.offset)               # placed while the point count still matches, then tidied
         self._finish(ob, got)
-        place(ob, got[0], self.offset)
         return {"FINISHED"}
 
     def invoke(self, context, event):
@@ -452,7 +452,7 @@ class BLENDA4D_OT_symmetry_extrude(bpy.types.Operator):
     def modal(self, context, event):
         ob = context.edit_object
         if event.type == "MOUSEMOVE":
-            # as C4D's Offset slider: right is more, left is less (and then in), whichever way the polygons face
+            # like an Offset slider: right is more, left is less (and then in), whichever way the polygons face
             self.offset = (event.mouse_x - self._mouse0.x) * self._px / self._scale
             if event.ctrl:
                 self.offset = round(self.offset / 0.1) * 0.1
@@ -508,7 +508,7 @@ def _groups(faces):
 
 
 def _inset_moves(faces, t):
-    """Where every point of the selection goes, C4D style: the outline slides t along its own polygons (in when t is
+    """Where every point of the selection goes: the outline slides t along its own polygons (in when t is
     positive, out when negative) at an even width, and the points inside follow smoothly so each group shrinks or
     grows as a whole instead of the outline running underneath it."""
     moves = {}
@@ -566,41 +566,73 @@ def _inset_moves(faces, t):
     return moves
 
 
-def _c4d_inset(bm, faces, t):
-    moves = _inset_moves(faces, t)
-    if not moves:
-        return
-    places = [p for p, _ in moves.values()]
-    offsets = [o for _, o in moves.values()]
+def inset_start(ob):
+    """Build the inset ring once, at no width, and say how each inner point moves: [(index, start, move per unit)],
+    {new point: the point it came from}, the inset polygons. Nothing is cleared or rebuilt afterwards, so shape keys,
+    UV maps and vertex groups stay as they were."""
+    bm = bmesh.from_edit_mesh(ob.data)
+    faces = [f for f in bm.faces if f.select]
+    if not faces:
+        return None
+    unit = _inset_moves(faces, 1.0)
+    places = [p for p, _ in unit.values()]
+    dirs = [d for _, d in unit.values()]
+    before = set(bm.verts)
+    ring = bmesh.ops.inset_region(bm, faces=faces, thickness=0.0, depth=0.0, use_even_offset=False,
+                                  use_interpolate=True, use_boundary=True)["faces"]
+    ring = set(ring)
+    inner = [f for f in bm.faces if f.select and f not in ring]
+    bm.verts.index_update()
+    bm.faces.index_update()
     kd = KDTree(len(places))
     for i, p in enumerate(places):
         kd.insert(p, i)
     kd.balance()
-    bmesh.ops.inset_region(bm, faces=faces, thickness=1e-6, depth=0.0, use_even_offset=False, use_boundary=True)
-    for v in {v for f in faces if f.is_valid for v in f.verts}:
-        co, i, d = kd.find(v.co)
-        if i is not None and d < 1e-4:
-            v.co = places[i] + offsets[i]
+    moving = []
+    for v in {v for f in inner for v in f.verts}:
+        _co, i, d = kd.find(v.co)
+        if i is not None and d < 1e-5:
+            moving.append((v.index, places[i].copy(), dirs[i].copy()))
+    old = KDTree(len(before))
+    olds = list(before)
+    for i, v in enumerate(olds):
+        old.insert(v.co, i)
+    old.balance()
+    weld = {}
+    for v in bm.verts:
+        if v not in before:
+            _co, i, d = old.find(v.co)
+            if i is not None and d < 1e-5:
+                weld[v.index] = olds[i].index
+    for e in bm.edges:
+        e.select = False
+    for f in bm.faces:
+        f.select = False
+    for v in bm.verts:
+        v.select = False
+    for f in inner:                                       # only the inset polygons stay picked, not the outline
+        f.select_set(True)
+    bm.select_flush_mode()
+    bmesh.update_edit_mesh(ob.data)
+    return moving, weld
 
 
-def inset_from(ob, backup, t):
-    """Put the mesh back as it was before the drag, then inset the selection by t (flared out when t is negative)."""
+def inset_to(ob, moving, t):
     bm = bmesh.from_edit_mesh(ob.data)
-    bm.clear()
-    bm.from_mesh(backup)
-    faces = [f for f in bm.faces if f.select]
-    if faces and abs(t) > 1e-9:
-        _c4d_inset(bm, faces, t)
-        keep = [f for f in faces if f.is_valid]
-        for v in bm.verts:
-            v.select = False
-        for e in bm.edges:
-            e.select = False
-        for f in bm.faces:
-            f.select = False
-        for f in keep:                                            # only the inset polygons stay picked, not the outline
-            f.select_set(True)
-        bm.select_flush_mode()
+    bm.verts.ensure_lookup_table()
+    for i, start, d in moving:
+        if i < len(bm.verts):
+            bm.verts[i].co = start + d * t
+    bm.normal_update()                                    # the ring was made at no width, with no normals to shade by
+    bmesh.update_edit_mesh(ob.data)
+
+
+def inset_undo(ob, moving, weld):
+    """Escape: the points back where they were and the ring welded away."""
+    inset_to(ob, moving, 0.0)
+    bm = bmesh.from_edit_mesh(ob.data)
+    bm.verts.ensure_lookup_table()
+    bmesh.ops.weld_verts(bm, targetmap={bm.verts[a]: bm.verts[b] for a, b in weld.items()})
     bmesh.update_edit_mesh(ob.data)
 
 
@@ -618,23 +650,23 @@ class BLENDA4D_OT_symmetry_inset(bpy.types.Operator):
 
     def execute(self, context):
         ob = context.edit_object
-        backup = bpy.data.meshes.new(".b4d_inset_backup")
-        bmesh.from_edit_mesh(ob.data).to_mesh(backup)
-        inset_from(ob, backup, self.thickness)
-        _drop(backup)
+        got = inset_start(ob)
+        if got is None:
+            return {"CANCELLED"}
+        inset_to(ob, got[0], self.thickness)
         return {"FINISHED"}
 
     def invoke(self, context, event):
         ob = context.edit_object
-        self._backup = bpy.data.meshes.new(".b4d_inset_backup")      # Escape puts this back exactly
-        bmesh.from_edit_mesh(ob.data).to_mesh(self._backup)
         if not ob.data.total_face_sel:
-            self._drop_backup()
             return {"CANCELLED"}
         from bpy_extras.view3d_utils import location_3d_to_region_2d, region_2d_to_location_3d
         bm = bmesh.from_edit_mesh(ob.data)
         sel = [f.calc_center_median() for f in bm.faces if f.select]
         at = ob.matrix_world @ (sum(sel, Vector()) / max(len(sel), 1))
+        self._got = inset_start(ob)
+        if self._got is None:
+            return {"CANCELLED"}
         region, rv3d = context.region, context.region_data
         xy = location_3d_to_region_2d(region, rv3d, at)
         self._px = 0.01
@@ -652,36 +684,21 @@ class BLENDA4D_OT_symmetry_inset(bpy.types.Operator):
             self.thickness = (event.mouse_x - self._x0) * self._px          # right: more inset, left: less, then flared
             if event.ctrl:
                 self.thickness = round(self.thickness / 0.05) * 0.05
-            inset_from(ob, self._backup, self.thickness)
+            inset_to(ob, self._got[0], self.thickness)
             us = context.scene.unit_settings
             context.area.header_text_set(f"Inset {bpy.utils.units.to_string(us.system, 'LENGTH', self.thickness * us.scale_length)}")
         elif event.type in {"LEFTMOUSE", "RET", "NUMPAD_ENTER"} and event.value in {"PRESS", "RELEASE"}:
-            self._drop_backup()
             context.area.header_text_set(None)
             return {"FINISHED"}
         elif event.type in {"RIGHTMOUSE", "ESC"} and event.value == "PRESS":
-            bm = bmesh.from_edit_mesh(ob.data)
-            bm.clear()
-            bm.from_mesh(self._backup)
-            bmesh.update_edit_mesh(ob.data)
-            self._drop_backup()
+            inset_undo(ob, *self._got)
             context.area.header_text_set(None)
             return {"CANCELLED"}
         return {"RUNNING_MODAL"}
 
 
-def _drop(mesh):
-    try:
-        bpy.data.meshes.remove(mesh)
-    except (ReferenceError, RuntimeError):
-        pass
-
-
-BLENDA4D_OT_symmetry_inset._drop_backup = lambda self: _drop(getattr(self, "_backup", None)) if getattr(self, "_backup", None) else None
-
-
 def standing_in(context):
-    """The tool a drag anywhere in the view runs, as in C4D, with or without Symmetry: "extrude", "inset" or None."""
+    """The tool a drag anywhere in the view runs, with or without Symmetry: "extrude", "inset" or None."""
     ob = context.edit_object
     if ob is None or ob.type != "MESH" or context.mode != "EDIT_MESH":
         return None
@@ -701,7 +718,7 @@ def _view_under(window, x, y):
 
 
 class BLENDA4D_OT_symmetry_drag_watch(bpy.types.Operator):
-    """While the stand-in Extrude is on, a drag anywhere in the view extrudes, as in C4D. Blender's select would act on
+    """While the stand-in Extrude is on, a drag anywhere in the view extrudes. Blender's select would act on
     the press already (a press on empty space deselects), so the press is taken here: a drag extrudes, a click
     without moving selects as usual. Shift, Ctrl and Alt presses go to Blender untouched."""
     bl_idname = "blenda4d.symmetry_drag_watch"

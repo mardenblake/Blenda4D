@@ -360,7 +360,7 @@ class BLENDA4D_PT_tb_symmetry(bpy.types.Panel):
             col = col.column()
             col.enabled = False
 
-        def line(label):                            # label on the left, the control on the right, as in C4D
+        def line(label):                            # label on the left, the control on the right
             sp = col.split(factor=0.3)
             sp.label(text=label)
             return sp.row(align=True)
