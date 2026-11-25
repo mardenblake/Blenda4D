@@ -78,15 +78,21 @@ def create(context, physical=False):
 
 
 def _adopt(scene):
-    """The Sky takes over the scene's World. The World it had is kept and comes back when the Sky is deleted; an HDRI
-    it showed becomes the Sky's HDRI."""
+    """The Sky takes over the scene's World; an HDRI it showed becomes the Sky's HDRI. Every HDRI dropped in replaces
+    the one before, and nothing old is kept: the dropped World and the replaced picture go once nothing uses them
+    (deleting the Sky leaves plain grey, never an earlier HDRI)."""
     old = scene.world
+    before = scene.b4d_sky_image
     if old is not None and old != scene.b4d_sky_world:
-        scene.b4d_sky_prev_world = old
         env = _environment(old.node_tree) if old.node_tree is not None else None
-        if env is not None and env.image is not None and scene.b4d_sky_image is None:
-            scene.b4d_sky_image = env.image
+        if env is not None and env.image is not None:
+            scene.b4d_sky_image = env.image          # every HDRI dropped in replaces the Sky's, as in C4D
+    scene.b4d_sky_prev_world = None
     scene.world = _our_world(scene)
+    if old is not None and old != scene.world and old.users == 0:
+        bpy.data.worlds.remove(old)
+    if before is not None and before != scene.b4d_sky_image and before.users == 0:
+        bpy.data.images.remove(before)
 
 
 def _environment(tree, seen=()):
@@ -289,18 +295,23 @@ def _views(scene, state):
 
 
 def _removed(scene):
-    """The Sky is gone: so is the sky. The World from before the Sky comes back (or a plain grey one)."""
-    w, prev = scene.b4d_sky_world, scene.b4d_sky_prev_world
+    """The Sky is gone: so is the sky. What is left is a plain medium grey, as in C4D with no Sky object (Joseph,
+    Nov 24: never an HDRI from before coming back)."""
+    w = scene.b4d_sky_world
+    img = scene.b4d_sky_image
     if scene.world is None or scene.world == w:
-        if prev is not None and prev != w:
-            scene.world = prev
-        else:
-            scene.world = bpy.data.worlds.new("World")
-            scene.world.color = GREY
-            scene.world.use_nodes = True
-            bg = next((n for n in scene.world.node_tree.nodes if n.type == "BACKGROUND"), None)
-            if bg is not None:
-                bg.inputs["Color"].default_value = (*GREY, 1.0)
+        grey = bpy.data.worlds.get("No Sky") or bpy.data.worlds.new("No Sky")
+        grey.color = (MID_GREY,) * 3
+        grey.use_nodes = True
+        nt = grey.node_tree
+        if not any(n.type == "BACKGROUND" for n in nt.nodes) or any(n.type == "TEX_ENVIRONMENT" for n in nt.nodes):
+            nt.nodes.clear()
+            out = nt.nodes.new("ShaderNodeOutputWorld"); out.location = (300, 0)
+            bg = nt.nodes.new("ShaderNodeBackground"); nt.links.new(bg.outputs[0], out.inputs[0])
+        bg = next(n for n in nt.nodes if n.type == "BACKGROUND")
+        bg.inputs["Color"].default_value = (MID_GREY, MID_GREY, MID_GREY, 1.0)
+        bg.inputs["Strength"].default_value = 1.0
+        scene.world = grey
     scene.b4d_sky_world = None
     scene.b4d_sky_prev_world = None
     if "b4d_sky_physical" in scene:
@@ -310,13 +321,59 @@ def _removed(scene):
         scene.property_unset(key)                # back to the defaults (no Sky: the update callbacks do nothing)
     if w is not None and w.users == 0:
         bpy.data.worlds.remove(w)
+    if img is not None and img.users == 0:
+        bpy.data.images.remove(img)              # no old HDRI left in the file
+
+
+_seen_world = {}                           # scene pointer -> the World it had at the last tick
+
+
+def _dropped_world(scene):
+    """An HDRI world dropped on the view (Blender's own drop of a World asset, Poly Haven's for one) while the scene
+    has no Sky: the Sky is made and takes it, and is selected so its controls are at hand, as in C4D. A World the
+    scene already had when first seen (a file just opened) is left alone."""
+    key = scene.as_pointer()
+    w = scene.world
+    now = w.as_pointer() if w is not None else 0
+    before = _seen_world.get(key)
+    _seen_world[key] = now
+    if before is None or before == now or w is None or w == scene.b4d_sky_world:
+        return False
+    if w.node_tree is None or _environment(w.node_tree) is None:
+        return False
+    try:
+        from . import switch
+        if not switch.is_on():
+            return False
+    except Exception:
+        pass
+    win = next((x for x in bpy.context.window_manager.windows if x.scene == scene), None)
+    if win is None:
+        return False
+    with bpy.context.temp_override(window=win, scene=scene):
+        ob = create(bpy.context)
+        for o in scene.objects:
+            if o.select_get():
+                o.select_set(False)
+        try:
+            ob.select_set(True)
+        except RuntimeError:
+            pass
+        bpy.context.view_layer.objects.active = ob
+    _seen_world[key] = scene.world.as_pointer() if scene.world is not None else 0
+    for a in win.screen.areas:
+        a.tag_redraw()
+    return True
 
 
 def sync(scene):
     ob = find(scene)
+    if ob is None and _dropped_world(scene):
+        ob = find(scene)
     if ob is None:
         if scene.b4d_sky_world is not None:
-            _removed(scene)
+            _removed(scene)                      # the World it had comes back: not a new drop
+            _seen_world[scene.as_pointer()] = scene.world.as_pointer() if scene.world is not None else 0
         if scene.get("b4d_sky_views", -1) != -1:
             scene["b4d_sky_views"] = -1
             _views(scene, -1)
@@ -324,10 +381,13 @@ def sync(scene):
     if scene.world != scene.b4d_sky_world or scene.b4d_sky_world is None:
         _adopt(scene)                            # a World set some other way (a dropped HDRI, say): the Sky takes it
         apply(scene)
+    if shown(ob)[1] and not scene.b4d_sky_hide_camera and scene.render.film_transparent:
+        scene.render.film_transparent = False    # the Sky decides what the camera sees: Hide from Camera, not Film Transparent
     state = 1 if shown(ob)[0] else 0
     if scene.get("b4d_sky_views", -1) != state:
         scene["b4d_sky_views"] = state
         _views(scene, state)
+    _seen_world[scene.as_pointer()] = scene.world.as_pointer() if scene.world is not None else 0
 
 
 def _tick():
@@ -362,14 +422,21 @@ def _render_end(scene, *_):
 
 # --- the Attribute Manager page ------------------------------------------------------------------------------------
 
+def _unit_row(col, scene, attr, label, unit, active):
+    """One layout for every number row, so Intensity, Rotation, Contrast and Saturation line up (fields, units, dots)."""
+    row = col.row()
+    row.active = active
+    sp = row.split(factor=0.93, align=True)
+    sp.prop(scene, attr, text=label)
+    sp.label(text=unit)
+
+
 def page_sky(col, ob):
     scene = bpy.context.scene
     image = scene.b4d_sky_image
     sun = physical_node(scene) if image is None and scene.get("b4d_sky_physical") else None
-    row = col.row()
-    row.active = (image is None and sun is None) or scene.b4d_sky_hide_camera
-    row.prop(scene, "b4d_sky_color", text="Sky Color")
-    col.prop(scene, "b4d_sky_intensity", text="Intensity")
+    _unit_row(col, scene, "b4d_sky_color", "Sky Color", "", (image is None and sun is None) or scene.b4d_sky_hide_camera)
+    _unit_row(col, scene, "b4d_sky_intensity", "Intensity", "", True)
     if sun is not None:
         col.separator()
         for label, attr in SUN_ROWS:
@@ -384,15 +451,9 @@ def page_sky(col, ob):
     sp.template_ID(scene, "b4d_sky_image", open="image.open")
     from . import sky_resolution
     sky_resolution.draw(col, scene)
-    row = col.row()
-    row.active = image is not None
-    row.prop(scene, "b4d_sky_rotation", text="Rotation")
+    _unit_row(col, scene, "b4d_sky_rotation", "Rotation", "", image is not None)
     for label, attr in (("Contrast", "b4d_sky_contrast"), ("Saturation", "b4d_sky_saturation")):
-        row = col.row()
-        row.active = image is not None
-        sp = row.split(factor=0.93, align=True)      # a plain field with "%" after it (a percent property is a slider)
-        sp.prop(scene, attr, text=label)
-        sp.label(text="%")
+        _unit_row(col, scene, attr, label, "%", image is not None)   # a plain field with "%" after it
     col.separator()
     row = col.row()
     row.active = image is not None or sun is not None
@@ -434,6 +495,82 @@ class BLENDA4D_OT_sky_nodes(bpy.types.Operator):
         area.tag_redraw()
 
 
+# --- an HDRI dropped into the scene ----------------------------------------------------------------------------------
+
+HDRI_EXTENSIONS = (".hdr", ".exr", ".hdri")
+
+
+class BLENDA4D_OT_sky_from_file(bpy.types.Operator):
+    """Light the scene with this HDRI: it goes on the scene's Sky (made if there is none), and the Sky is selected so
+    its settings show in the Attribute Manager"""
+    bl_idname = "blenda4d.sky_from_file"
+    bl_label = "Use as Sky"
+    bl_options = {"REGISTER", "UNDO", "INTERNAL"}
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH", options={"SKIP_SAVE"})
+    directory: bpy.props.StringProperty(subtype="DIR_PATH", options={"SKIP_SAVE", "HIDDEN"})
+    files: bpy.props.CollectionProperty(type=bpy.types.OperatorFileListElement, options={"SKIP_SAVE", "HIDDEN"})
+
+    def _path(self):
+        import os
+        if self.directory and len(self.files):
+            for f in self.files:                       # several dropped: the first HDRI wins (one sky per scene)
+                if f.name.lower().endswith(HDRI_EXTENSIONS):
+                    return os.path.join(self.directory, f.name)
+        return self.filepath
+
+    def execute(self, context):
+        path = self._path()
+        if not path or not path.lower().endswith(HDRI_EXTENSIONS):
+            self.report({"WARNING"}, "Drop an HDRI (.hdr or .exr)")
+            return {"CANCELLED"}
+        try:
+            image = bpy.data.images.load(path, check_existing=True)
+        except RuntimeError as e:
+            self.report({"ERROR"}, f"Could not read {path}: {e}")
+            return {"CANCELLED"}
+        ob = create(context)
+        before = context.scene.b4d_sky_image
+        context.scene.b4d_sky_image = image
+        if before is not None and before != image and before.users == 0:
+            bpy.data.images.remove(before)           # nothing old kept
+        for o in context.selected_objects:
+            o.select_set(False)
+        try:
+            ob.select_set(True)
+        except RuntimeError:
+            pass
+        context.view_layer.objects.active = ob
+        for area in context.screen.areas:
+            area.tag_redraw()
+        self.report({"INFO"}, f"Sky: {image.name}")
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+
+class BLENDA4D_FH_sky_drop(bpy.types.FileHandler):
+    """An .hdr or .exr dragged onto the 3D view or the Object Manager becomes the scene's Sky, as in C4D"""
+    bl_idname = "BLENDA4D_FH_sky_drop"
+    bl_label = "Use as Sky"
+    bl_import_operator = "blenda4d.sky_from_file"
+    bl_file_extensions = ";".join(HDRI_EXTENSIONS)
+
+    @classmethod
+    def poll_drop(cls, context):
+        area = context.area
+        if area is None:
+            return False
+        if area.type == "VIEW_3D":
+            return True
+        from . import roles
+        return roles.role(area) == "OBJECTS"
+
+
+SKY_DROP_CLASSES = (BLENDA4D_OT_sky_from_file, BLENDA4D_FH_sky_drop)
+
+
 # --- the Floor -----------------------------------------------------------------------------------------------------
 
 FLOOR_SIZE = 200.0                         # metres: reaches the horizon in most shots
@@ -455,6 +592,8 @@ def create_floor(context):
 
 def register():
     bpy.utils.register_class(BLENDA4D_OT_sky_nodes)
+    for c in SKY_DROP_CLASSES:
+        bpy.utils.register_class(c)
     from . import sky_resolution
     sky_resolution.register()
     S = bpy.types.Scene
@@ -554,6 +693,9 @@ def unregister():
             delattr(S, n)
     if hasattr(bpy.types, "BLENDA4D_OT_sky_nodes"):
         bpy.utils.unregister_class(BLENDA4D_OT_sky_nodes)
+    for c in reversed(SKY_DROP_CLASSES):
+        if c.is_registered:
+            bpy.utils.unregister_class(c)
     from . import sky_resolution
     if hasattr(bpy.types, "BLENDA4D_OT_sky_resolution"):
         sky_resolution.unregister()

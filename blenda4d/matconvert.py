@@ -354,8 +354,55 @@ def to_blender(mat):
         except (AttributeError, TypeError):
             pass
     new.diffuse_color = (*_rgb(st["Base Color"][0]), 1.0)
+    _carry_keys(mat, _main(_octane_node(mat)), new, bsdf)
     _swap(mat, new)
     return True
+
+
+# Octane input -> Principled BSDF input, for keyframes (a title fading in on Opacity must still fade in on Alpha)
+_KEYED = {"Opacity": "Alpha", "Albedo": "Base Color", "Diffuse": "Base Color", "Roughness": "Roughness",
+          "Specular roughness": "Roughness", "Metallic": "Metallic", "Coating roughness": "Coat Roughness",
+          "Dielectric IOR": "IOR", "Index of refraction": "IOR"}
+
+
+def _carry_keys(mat, node, new, bsdf):
+    """Copy the Octane material's keyframes onto the matching Principled BSDF inputs of the new material."""
+    ad = mat.node_tree.animation_data if mat.node_tree else None
+    if node is None or ad is None or ad.action is None:
+        return
+    try:
+        from bpy_extras import anim_utils
+        cb = anim_utils.action_get_channelbag_for_slot(ad.action, ad.action_slot)
+        fcs = list(cb.fcurves) if cb else []
+    except Exception:
+        fcs = list(getattr(ad.action, "fcurves", []))
+    head = f'nodes["{node.name}"].inputs['
+    for fc in fcs:
+        if not fc.data_path.startswith(head) or not fc.data_path.endswith("].default_value"):
+            continue
+        try:
+            sock = node.inputs[int(fc.data_path[len(head):].split("]")[0])]
+        except (ValueError, IndexError):
+            continue
+        target = bsdf.inputs.get(_KEYED.get(sock.name, ""))
+        if target is None:
+            continue
+        idx = list(bsdf.inputs).index(target)
+        path = f'nodes["{bsdf.name}"].inputs[{idx}].default_value'
+        is_color = target.type == "RGBA"
+        for k in fc.keyframe_points:
+            f, v = k.co
+            if is_color:
+                cur = list(target.default_value); cur[fc.array_index] = v; target.default_value = cur
+                new.node_tree.keyframe_insert(path, index=fc.array_index, frame=f)
+            else:
+                target.default_value = v
+                new.node_tree.keyframe_insert(path, frame=f)
+        if target.name == "Alpha":
+            try:
+                new.surface_render_method = "BLENDED"
+            except (AttributeError, TypeError):
+                pass
 
 
 # --- the buttons -------------------------------------------------------------------------------------------------------------------

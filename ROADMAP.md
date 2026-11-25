@@ -7,11 +7,12 @@ own file under `blenda4d/` and plugs in through `kinds.py`, so most items touch 
 1. **Timeline**: the full animation workflow. A keyframe editor docked above the transport row, a curve editor, framing
    all, selected or current keys, key pages (interpolation, tangents, what happens before and after the keys), and
    jumping to or deleting keys from any setting. Today's timeline is the transport row only.
-2. **Cloning tools (MoClone)**, the rest (`moclone*.py`): the Cloner, Matrix, seven effectors, nine fields, clone physics and the field tags are in.
-   Still to come: Text whose letters act as clones, Fracture and Voronoi Fracture, MoExtrude, PolyFX, MoSpline, Tracer,
-   MoInstance; the Formula, Inheritance, Push Apart, ReEffector, Sound, Spline, Volume and Group effectors; Blend and
-   Sort clone modes (with Modify Clone); the field-layer stack (Time, Step, Delay, Decay, Freeze, Remap, Curve...);
-   Weight Paint and the Selection tool for clones; Cache; a Multi Shader; more than one of each field tag per object.
+2. **Cloning tools (MoClone)**, the rest (`moclone*.py`): the Cloner, Matrix, Fracture, Voronoi Fracture, MoText,
+   MoExtrude, PolyFX, MoSpline, Tracer and MoInstance are in, with the first seven effectors plus Formula, Inheritance,
+   Push Apart, ReEffector, Sound, Spline, Volume and Group, nine fields, clone physics and the field tags.
+   Still to come: Blend and Sort clone modes (with Modify Clone); the field-layer stack (Time, Step, Delay, Decay,
+   Freeze, Remap, Curve...); Weight Paint and the Selection tool for clones; a MoClone Cache; a Multi Shader; more than
+   one of each field tag per object.
 
 ## Splines (`splines.py`)
 - Our own point-editing tools (Blender's curve edit mode and Pen stand in today).

@@ -212,20 +212,26 @@ def _draw_tree(col, context, libs):
                        depress=_st["folder"] == key).folder = key
     col.separator()
     paths = sorted({p for _n, path, _w in libs for _u, p, _s in lib.read_catalogs(path)}, key=str.lower)
+    u = _unit()
+    tree_w = max(4.0 * u, (context.region.width if context.region else 300) * SPLIT - 0.5 * u)
     have = set(paths)
     for p in paths:
         parts = p.split("/")
         if any("/".join(parts[:i]) not in _st["open"] for i in range(1, len(parts))):
             continue                                  # under a folded folder
         kids = any(q.startswith(p + "/") for q in have)
-        r = col.row(align=True)
-        r.alignment = "LEFT"
-        r.separator(factor=1.5 * (len(parts) - 1))
+        # fixed pixel places: the indent and the arrow keep their size in a narrow column (squeezed, Blender greyed
+        # the arrows and dropped names); only a long name gives way, shortened with "..."
+        sp = col.split(factor=min(0.7, (1.5 * 0.5 * u * (len(parts) - 1) + 1.1 * u) / tree_w), align=True)
+        left = sp.row(align=True)
+        left.alignment = "RIGHT"
         if kids:
-            r.operator("blenda4d.ab_fold", text="", emboss=False,
-                       icon="DISCLOSURE_TRI_DOWN" if p in _st["open"] else "DISCLOSURE_TRI_RIGHT").folder = p
+            left.operator("blenda4d.ab_fold", text="", emboss=False,
+                          icon="DISCLOSURE_TRI_DOWN" if p in _st["open"] else "DISCLOSURE_TRI_RIGHT").folder = p
         else:
-            r.label(text="", icon="BLANK1")
+            left.label(text="", icon="BLANK1")
+        r = sp.row(align=True)
+        r.alignment = "LEFT"
         sel = _st["folder"] == p and not _st["home"]
         r.operator("blenda4d.ab_open", text=parts[-1], icon="FILE_FOLDER", emboss=sel, depress=sel).folder = p
     r = col.row(align=True)

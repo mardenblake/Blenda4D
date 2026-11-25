@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "blenda4d"
-version = "0.1.51"
+version = "0.1.54"
 name = "Blenda 4D"
 tagline = "A motion-design layout, managers and workflows for Blender"
 maintainer = "Blenda 4D contributors"
